@@ -1,80 +1,26 @@
-"""
-camera_gui.py
-=============
-A PyQt5 GUI that displays TWO concurrent video feeds, sourced from a single
-live camera that is duplicated inside a GStreamer pipeline.
-
-WHY THIS SHAPE
---------------
-The Camera Systems team works in PyQt + GStreamer, so this mirrors that stack:
-
-    * GStreamer does the video work (capture, colour conversion, splitting).
-    * PyQt5 does the GUI (layout, controls, drawing the frames).
-
-A single camera is captured once and split with a GStreamer `tee` into two
-identical branches. Each branch ends in an `appsink` -- an element that hands
-raw frames back to Python instead of drawing them itself. That satisfies the
-"two concurrent feeds" requirement using the recommended "duplicated live
-stream" approach: one real source, shown twice, proving simultaneous
-integration without needing two physical cameras.
-
-THE PIPELINE (what each piece does)
------------------------------------
-    avfvideosrc            macOS camera capture (the Apple AVFoundation source)
-      ! videoconvert       turn whatever the camera outputs into a known format
-      ! videoscale         resize to a fixed size
-      ! video/x-raw,RGB    force plain RGB at 640x480 (predictable, easy to draw)
-      ! tee name=t         SPLIT the stream into two identical outputs
-        t. ! queue ! appsink sink0      branch 1 -> Python -> left pane
-        t. ! queue ! appsink sink1      branch 2 -> Python -> right pane
-
-`videotestsrc` can replace `avfvideosrc` as a no-hardware fallback (a moving
-test pattern), selectable from the GUI.
-
-THREADING (the one genuinely tricky part)
------------------------------------------
-GStreamer calls our `appsink` callback on its OWN internal streaming threads,
-NOT on the Qt main thread. You may never touch Qt widgets from another thread.
-So the callback only does cheap, thread-safe work -- copy the frame into a
-QImage -- and then emits a Qt signal. Qt delivers that signal to the GUI thread
-as a queued event, which is the supported way to move data between threads.
-The widget is updated only inside the GUI-thread slot.
-
-RUNNING IT
-----------
-    conda activate camerafeed        # the env with PyGObject + GStreamer + PyQt
-    python camera_gui.py
-
-See README.md for full setup and design notes.
-"""
-
 import sys
 import time
 
-# --- GStreamer (via PyGObject / the `gi` bindings) -------------------------
+# GStreamer doesn't speak Python on its own -- the `gi` bindings ("PyGObject") are the bridge that lets Python call into it. We have to declare which GStreamer version we want BEFORE importing it, hence the require_version line.
 import gi
-gi.require_version("Gst", "1.0")          # pin the GStreamer API version
-from gi.repository import Gst, GLib        # noqa: E402  (must come after require_version)
+gi.require_version("Gst", "1.0") # ask for the GStreamer 1.0 API
+from gi.repository import Gst, GLib 
 
-# --- PyQt5 -----------------------------------------------------------------
-from PyQt5.QtWidgets import (              # noqa: E402
+# Everything we need from PyQt5: the widgets (buttons, labels, layouts), the image/picture classes for drawing frames, and the core bits for signals.
+from PyQt5.QtWidgets import (   
     QApplication, QMainWindow, QWidget, QLabel,
     QHBoxLayout, QVBoxLayout, QPushButton, QComboBox, QFileDialog,
 )
-from PyQt5.QtGui import QImage, QPixmap     # noqa: E402
-from PyQt5.QtCore import Qt, QObject, pyqtSignal, QTimer  # noqa: E402
+from PyQt5.QtGui import QImage, QPixmap 
+from PyQt5.QtCore import Qt, QObject, pyqtSignal, QTimer 
 
 
-# Fixed capture geometry. Forcing a known size keeps the byte layout simple:
-# RGB at 640 wide is 640*3 = 1920 bytes per row, already 4-byte aligned, so
-# there is no row padding to worry about when we build the QImage.
+# We force every frame to this exact size. Picking a fixed size up front saves a headache later: an RGB image that's 640 pixels wide is exactly 640*3 = 1920 bytes per row, with no leftover padding bytes, so PyQt reads the raw pixels correctly without us doing any awkward alignment maths.
 CAPTURE_WIDTH = 640
 CAPTURE_HEIGHT = 480
 
 
-# ===========================================================================
 # 1. THE GSTREAMER SIDE
-# ===========================================================================
 class CameraPipeline(QObject):
     """
     Owns the GStreamer pipeline and turns its frames into Qt signals.
@@ -84,8 +30,7 @@ class CameraPipeline(QObject):
     failing silently.
     """
 
-    # A frame is ready for feed 0 / feed 1. The QImage is already a private
-    # copy, so the GUI thread can keep it safely.
+    # A frame is ready for feed 0 / feed 1. The QImage is already a private copy, so the GUI thread can keep it safely.
     frame_ready_0 = pyqtSignal(QImage)
     frame_ready_1 = pyqtSignal(QImage)
     # Something went wrong in the pipeline (e.g. camera permission denied).
@@ -96,7 +41,7 @@ class CameraPipeline(QObject):
         self.pipeline = None
         self._bus_timer = None
 
-    # ----- pipeline construction -------------------------------------------
+    # Pipeline Construction
     def _build_description(self, use_test_source):
         """
         Return the GStreamer pipeline as a single launch string.
@@ -107,12 +52,9 @@ class CameraPipeline(QObject):
 
         appsink options explained:
             emit-signals=true  -> fire 'new-sample' so Python gets each frame
-            max-buffers=1 drop=true -> only ever hold the newest frame; if the
-                                       GUI is slow, drop stale frames instead of
-                                       building up lag (right trade-off for live
-                                       video -- freshness beats completeness)
-            sync=false         -> hand frames over as fast as they arrive
-            caps=...RGB        -> guarantee the bytes are plain RGB for drawing
+            max-buffers=1 drop=true -> only ever hold the newest frame; if the GUI is slow, drop stale frames instead of building up lag (right trade-off for live video -- freshness beats completeness)
+            sync=false -> hand frames over as fast as they arrive
+            caps=...RGB -> guarantee the bytes are plain RGB for drawing
         """
         if use_test_source:
             # No hardware needed: an animated SMPTE-style test pattern.
@@ -136,26 +78,21 @@ class CameraPipeline(QObject):
 
     def start(self, use_test_source=False):
         """(Re)build the pipeline and start playing."""
-        self.stop()  # tear down any previous run first
+        self.stop()  # Tear down any previous run first
 
         description = self._build_description(use_test_source)
         try:
-            # parse_launch builds the whole element graph from the text above,
-            # exactly like the `gst-launch-1.0` command-line tool does.
+            # Parse_launch builds the whole element graph from the text above, exactly like the `gst-launch-1.0` command-line tool does.
             self.pipeline = Gst.parse_launch(description)
         except GLib.Error as exc:
             self.error.emit(f"Could not build pipeline: {exc}")
             return
 
-        # Grab each appsink by the name we gave it and wire its 'new-sample'
-        # signal to our handler. The extra argument (0 or 1) tells the shared
-        # handler which feed the frame belongs to.
+        # Grab each appsink by the name we gave it and wire its 'new-sample' signal to our handler. The extra argument (0 or 1) tells the shared handler which feed the frame belongs to.
         self.pipeline.get_by_name("sink0").connect("new-sample", self._on_sample, 0)
         self.pipeline.get_by_name("sink1").connect("new-sample", self._on_sample, 1)
 
-        # Poll the pipeline's message bus from the GUI thread for errors / EOS.
-        # A QTimer keeps this on the Qt event loop (no extra GLib main loop
-        # needed), which keeps the threading model as simple as possible.
+        # Poll the pipeline's message bus from the GUI thread for errors / EOS. A QTimer keeps this on the Qt event loop (no extra GLib main loop needed), which keeps the threading model as simple as possible.
         bus = self.pipeline.get_bus()
         self._bus_timer = QTimer()
         self._bus_timer.timeout.connect(lambda: self._poll_bus(bus))
@@ -169,10 +106,10 @@ class CameraPipeline(QObject):
             self._bus_timer.stop()
             self._bus_timer = None
         if self.pipeline is not None:
-            self.pipeline.set_state(Gst.State.NULL)  # frees the camera
+            self.pipeline.set_state(Gst.State.NULL)  # Frees the camera
             self.pipeline = None
 
-    # ----- per-frame callback (runs on a GStreamer streaming thread) -------
+    # Per-frame callback (runs on a GStreamer streaming thread) 
     def _on_sample(self, appsink, which):
         """
         Called by GStreamer for every new frame. Convert it to a QImage and
@@ -192,11 +129,9 @@ class CameraPipeline(QObject):
         if not ok:
             return Gst.FlowReturn.ERROR
         try:
-            # bytes-per-row. With our forced 640-wide RGB this is exactly
-            # width*3 and 4-byte aligned, so QImage reads it correctly.
+            # Bytes-per-row. With our forced 640-wide RGB this is exactly  width*3 and 4-byte aligned, so QImage reads it correctly.
             stride = info.size // height
-            # Wrap the bytes as a QImage, then COPY so we own the memory --
-            # GStreamer frees `info` the instant we unmap below.
+            # Wrap the bytes as a QImage, then COPY so we own the memory GStreamer frees `info` the instant we unmap below.
             image = QImage(
                 bytes(info.data), width, height, stride, QImage.Format_RGB888
             ).copy()
@@ -210,7 +145,7 @@ class CameraPipeline(QObject):
             self.frame_ready_1.emit(image)
         return Gst.FlowReturn.OK
 
-    # ----- bus polling -----------------------------------------------------
+    # Bus Polling
     def _poll_bus(self, bus):
         """Drain pending bus messages; surface errors and end-of-stream."""
         msg = bus.timed_pop_filtered(
@@ -224,17 +159,14 @@ class CameraPipeline(QObject):
         elif msg.type == Gst.MessageType.EOS:
             self.error.emit("Stream ended (end-of-stream).")
 
-
-# ===========================================================================
 # 2. ONE VIDEO PANE (a reusable widget: title + picture + live FPS)
-# ===========================================================================
 class VideoPane(QWidget):
     """A single feed's display: a heading, the video image, and an FPS read-out."""
 
     def __init__(self, title):
         super().__init__()
-        self._last_image = None      # keep the latest frame for snapshots
-        self._frame_times = []       # timestamps used to compute a rolling FPS
+        self._last_image = None      # Keep the latest frame for snapshots
+        self._frame_times = []       # Timestamps used to compute a rolling FPS
 
         # Heading above the video.
         self.title_label = QLabel(title)
@@ -261,8 +193,7 @@ class VideoPane(QWidget):
         """Slot: receives a QImage on the GUI thread and draws it."""
         self._last_image = image
 
-        # Scale to fit the label while preserving aspect ratio, so resizing the
-        # window never distorts the picture.
+        # Scale to fit the label while preserving aspect ratio, so resizing the window never distorts the picture.
         pixmap = QPixmap.fromImage(image).scaled(
             self.video_label.size(),
             Qt.KeepAspectRatio,
@@ -275,7 +206,7 @@ class VideoPane(QWidget):
         """Rolling frames-per-second over roughly the last second."""
         now = time.monotonic()
         self._frame_times.append(now)
-        # keep only timestamps from the last second
+        # Keep only timestamps from the last second
         self._frame_times = [t for t in self._frame_times if now - t < 1.0]
         self.fps_label.setText(f"FPS: {len(self._frame_times)}")
 
@@ -286,23 +217,20 @@ class VideoPane(QWidget):
         return self._last_image.save(path)
 
 
-# ===========================================================================
 # 3. THE MAIN WINDOW (layout + controls, wiring pipeline to panes)
-# ===========================================================================
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Dual Camera Feed — PyQt5 + GStreamer")
 
-        # The two feeds, side by side. This is the "structured, intentional
-        # layout" the task asks for: equal panes, clearly labelled.
+        # The two feeds, side by side. This is the "structured, intentional layout" the task asks for: equal panes, clearly labelled.
         self.pane0 = VideoPane("Feed 1  (live)")
         self.pane1 = VideoPane("Feed 2  (duplicated)")
         feeds = QHBoxLayout()
         feeds.addWidget(self.pane0)
         feeds.addWidget(self.pane1)
 
-        # ----- control bar -------------------------------------------------
+        # Control bar
         self.source_box = QComboBox()
         self.source_box.addItems(["Webcam (avfvideosrc)", "Test pattern (videotestsrc)"])
 
@@ -329,7 +257,7 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage("Idle. Pick a source and press Start.")
 
-        # ----- the pipeline + signal wiring --------------------------------
+        # Pipeline + String Wiring
         self.pipeline = CameraPipeline()
         # Frames flow: GStreamer thread -> (queued signal) -> GUI slot.
         self.pipeline.frame_ready_0.connect(self.pane0.update_frame)
@@ -340,7 +268,7 @@ class MainWindow(QMainWindow):
         self.stop_btn.clicked.connect(self._on_stop)
         self.snap_btn.clicked.connect(self._on_snapshot)
 
-    # ----- button handlers -------------------------------------------------
+    # Button Handlers
     def _on_start(self):
         use_test = self.source_box.currentIndex() == 1
         self.pipeline.start(use_test_source=use_test)
@@ -380,15 +308,13 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Error: {message}")
         self._on_stop()
 
-    # ----- make sure the camera is released on quit ------------------------
+    # Make sure the camera is released on quit
     def closeEvent(self, event):
         self.pipeline.stop()
         super().closeEvent(event)
 
 
-# ===========================================================================
 # 4. ENTRY POINT
-# ===========================================================================
 def main():
     # GStreamer must be initialised once, before any pipeline is built.
     Gst.init(None)

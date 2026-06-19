@@ -2,201 +2,210 @@
 
 Camera Systems task for the TMR software recruitment package.
 
-A PyQt5 desktop GUI that displays **two concurrent video feeds**. A single live
-camera is captured once and duplicated inside a GStreamer pipeline, so both
-panes show the same live source running simultaneously — the "duplicated live
-stream" approach the task recommends.
+A PyQt5 desktop app that shows **two live video feeds at once**. It grabs a
+single camera, and uses GStreamer to split that one stream into two identical
+copies, which are drawn side by side in the window. So you see two feeds, but
+there's only ever one real camera running underneath — the "duplicated live
+stream" approach the brief recommends. It proves simultaneous video works
+without needing two physical cameras.
 
-![layout](layout-not-included) <!-- placeholder: the running window is two equal
-video panes side by side, with a control bar underneath. -->
-
-```
-┌───────────────────────────────┬───────────────────────────────┐
-│        Feed 1  (live)         │      Feed 2  (duplicated)     │
-│   ┌───────────────────────┐   │   ┌───────────────────────┐   │
-│   │      live video       │   │   │      live video       │   │
-│   └───────────────────────┘   │   └───────────────────────┘   │
-│           FPS: 30             │           FPS: 30             │
-├───────────────────────────────┴───────────────────────────────┤
-│ Source: [Webcam ▾] [Start] [Stop] [Snapshot both]             │
-├────────────────────────────────────────────────────────────────┤
-│ Streaming…                                                     │  status bar
-└────────────────────────────────────────────────────────────────┘
-```
+The window is two equal video panes side by side, each with a title and a live
+FPS readout, and a control bar underneath (source selector, Start, Stop,
+Snapshot) plus a status bar along the bottom.
 
 ---
 
-## 1. Why GStreamer (and how I set it up)
+## Requirements coverage
 
-The task recommends GStreamer because that's what the Camera Systems team uses,
-so I built directly on it rather than on a higher-level alternative. GStreamer
-does the video work (capture, colour conversion, splitting the stream); PyQt5
-does the GUI (layout, controls, drawing the frames).
-
-The one wrinkle: GStreamer was on my machine, but its **Python bindings**
-(`PyGObject` / the `gi` module) and several plugins were not, and the system
-Python had no Qt at all. Rather than disturb my base environment I created an
-**isolated conda environment** that pins a known-good stack. This is also why
-the project is reproducible — the exact toolchain is captured below.
-
-| Component        | Version    | Role                                   |
-|------------------|------------|----------------------------------------|
-| Python           | 3.12       | runtime                                |
-| GStreamer        | 1.28       | capture / convert / split video        |
-| PyGObject (`gi`) | conda-forge| lets Python drive GStreamer            |
-| PyQt5            | 5.15.2     | the GUI                                |
+| Requirement | How it's met |
+|---|---|
+| GUI built with PyQt | Pure PyQt5 — window, panes, buttons, and layouts. |
+| Both feeds in a clear, intentional layout | Two equal labelled panes side by side, with a control bar and status bar below. |
+| A working video stream | Live webcam via GStreamer, shown in both panes; a no-hardware test pattern is also included. |
+| Document the development process | Section 1. |
+| Explain how the code runs | Sections 3 and 4. |
+| Reasoning behind the design and features | Sections 2, 4, and 5. |
+| Well-commented code | Every class, method, and tricky line is commented in `camera_gui.py`. |
+| Duplicated live stream (recommended) | A GStreamer `tee` clones one capture into two feeds. |
+| What I'd build next | Section 6. |
 
 ---
 
-## 2. How to run it
+## Project files
 
-### One-time setup (creates the isolated environment)
+| File | Purpose |
+|---|---|
+| `camera_gui.py` | The whole app, in one commented file. |
+| `environment.yml` | The exact conda environment, so it's reproducible. |
+| `README.md` | This document. |
 
-```bash
-conda create -y -n camerafeed -c conda-forge \
-    python=3.12 pygobject gst-python \
-    gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
-    pyqt numpy
+---
+
+## 1. Development process
+
+I worked in four steps:
+
+1. **Checked the environment first.** Before writing anything I looked at what
+   was installed. GStreamer's command-line tools were there, but its Python
+   bindings, OpenCV, and Qt were not. That told me the real work was setting up
+   a correct toolchain, and it shaped the backend choice in Section 2.
+2. **Picked the backend and isolated it.** I went with GStreamer (the team's
+   stack) and put it in a dedicated conda environment, so my base install stayed
+   clean and the project stays reproducible for whoever runs it.
+3. **Built the video path before the GUI.** The hard part is getting frames out
+   of GStreamer and safely onto PyQt's thread, so I solved that first (Section
+   4.2), then built the window around it.
+4. **Tested, then documented.** I verified the frame path with an automated
+   headless test (Section 5) before writing this.
+
+---
+
+## 2. Why GStreamer
+
+The brief recommends GStreamer because it's what the Camera Systems team uses,
+and allows an alternative only if it's clearly justified. I chose GStreamer so
+my code lives in the same world the team works in. The split is simple:
+
+- **GStreamer** does the video — grabbing frames, fixing the colour format, and
+  splitting the stream into two.
+- **PyQt5** does everything you see — the window, the buttons, and drawing each
+  frame.
+
+The only catch was that GStreamer's Python bindings and some plugins weren't
+installed, and the default Python had no Qt. Rather than touch my base setup, I
+built an isolated conda environment with a known-good toolchain. `environment.yml`
+recreates it exactly. The key versions: Python 3.12, GStreamer 1.28, PyQt5
+5.15.2, and PyGObject (the bridge that lets Python drive GStreamer).
+
+---
+
+## 3. How to run it
+
+### One-time setup
+
+```
+conda env create -f environment.yml
 ```
 
-`gst-plugins-bad` is included because the macOS camera source
-(`avfvideosrc`, from Apple's AVFoundation) ships in that plugin set.
+### Run
 
-### Each time you run it
-
-```bash
+```
 conda activate camerafeed
 cd PyQT_GUI
 python camera_gui.py
 ```
 
-Then in the window: pick a **Source**, press **Start**. With *Webcam* selected,
-macOS will ask for camera permission the first time — allow it. If you have no
-camera or are running over SSH, choose **Test pattern (videotestsrc)**, which
-needs no hardware and is what I used for automated testing.
+Then pick a **Source** and press **Start**:
 
-> Note: the **Test pattern** source always works with zero setup. The **Webcam**
-> source needs camera permission granted to your terminal app
-> (System Settings → Privacy & Security → Camera).
+- **Webcam** — the live camera. macOS asks for camera permission the first time;
+  allow it (System Settings, then Privacy & Security, then Camera).
+- **Test pattern** — a moving pattern GStreamer makes itself. No camera or
+  permission needed; handy for a quick check or a machine with no camera.
 
 ---
 
-## 3. How the code works
+## 4. How the code works
 
-The whole program is one file, `camera_gui.py`, in four clearly-commented
-sections. Here is the design at a glance.
+`camera_gui.py` is one file in four commented sections: the GStreamer side, one
+video pane, the main window, and the entry point.
 
-### 3.1 The GStreamer pipeline — one source, two feeds
+### 4.1 The pipeline — one camera, two feeds
+
+GStreamer builds the whole video path from a single text recipe. In plain terms
+it reads: grab the camera, normalise the format, resize to 640x480 RGB, then
+split. The split is the important part:
 
 ```
-avfvideosrc                      capture the camera once
-  ! videoconvert ! videoscale    normalise format and size
-  ! video/x-raw,format=RGB,640x480
-  ! tee name=t                   *** SPLIT into two identical streams ***
-      t. ! queue ! appsink sink0     branch 1 → Python → left pane
-      t. ! queue ! appsink sink1     branch 2 → Python → right pane
+camera  ->  convert  ->  resize to 640x480 RGB  ->  tee
+                                                      |-> queue -> appsink (left pane)
+                                                      |-> queue -> appsink (right pane)
 ```
 
-* **`tee`** is what makes this "two concurrent feeds" from one camera: it
-  duplicates every frame down both branches. This is deliberately better than
-  opening the camera twice — most cameras can only be opened by one consumer,
-  and capturing once is cheaper.
-* **`queue`** on each branch decouples the two feeds so a hiccup in one can't
-  stall the other (each `queue` runs its branch on its own thread).
-* **`appsink`** is the bridge out of GStreamer: instead of drawing the video
-  itself, it hands each raw frame back to Python. It's configured with
-  `max-buffers=1 drop=true` so that if the GUI ever falls behind, GStreamer
-  drops stale frames rather than building up latency — the right trade-off for
-  *live* video, where the newest frame matters more than every frame.
-* Switching the Source dropdown to the test pattern simply swaps
-  `avfvideosrc` for `videotestsrc`; everything downstream is identical.
+- **`tee`** is the core idea — it clones every frame down both branches. This is
+  better than opening the camera twice, since most cameras allow only one
+  consumer, and grabbing once is cheaper.
+- **`queue`** on each branch gives each feed its own small buffer on its own
+  thread, so if one feed stutters it can't drag the other down.
+- **`appsink`** is the exit door out of GStreamer — instead of drawing the video
+  itself, it hands each frame back to Python. It's set to keep only the newest
+  frame and drop old ones, so if the GUI ever falls behind there's no growing
+  lag. For live video, the newest frame matters more than every frame.
+- Choosing the test pattern just swaps the camera source for `videotestsrc`;
+  everything after the split is identical.
 
-### 3.2 Getting frames from GStreamer into Qt (the threading model)
+### 4.2 Getting frames into PyQt — the threading part
 
-This is the only subtle part, and the code is heavily commented around it.
+This is the only subtle bit. GStreamer hands us each frame from its own
+background threads, but PyQt only lets you touch the window from its own thread.
+So the rule is:
 
-GStreamer calls our `appsink` callback on **its own streaming threads**, not on
-Qt's GUI thread. Touching a Qt widget from another thread is undefined
-behaviour, so the rule is strict:
+1. On GStreamer's thread, do the bare minimum: copy the frame into a `QImage`
+   (a private copy, since GStreamer reuses its buffer immediately), then emit a
+   PyQt signal carrying it. No window code runs here.
+2. PyQt delivers that signal to the main thread — its built-in, safe way to pass
+   data between threads.
+3. On the main thread, the pane scales the image to fit (keeping its proportions)
+   and draws it.
 
-1. **On the GStreamer thread** (`CameraPipeline._on_sample`): map the frame's
-   bytes, wrap them in a `QImage`, and immediately `.copy()` so we own the
-   memory (GStreamer frees its buffer the moment we unmap). Then `emit` a Qt
-   signal carrying that QImage. *No widget is touched here.*
-2. **Qt delivers the signal to the GUI thread** as a queued event — the
-   supported, thread-safe way to move data between threads.
-3. **On the GUI thread** (`VideoPane.update_frame`): scale the image to the
-   pane (preserving aspect ratio) and draw it.
+Forcing capture to 640x480 RGB keeps this clean: each row is exactly 1920 bytes
+with no padding, so PyQt reads the raw pixels correctly with no alignment maths.
 
-Forcing the capture to 640×480 RGB keeps this conversion trivial: each row is
-exactly `640 × 3 = 1920` bytes with no padding, so the `QImage` reads the bytes
-correctly with no stride surprises.
+### 4.3 The window — `VideoPane` and `MainWindow`
 
-### 3.3 The GUI (`VideoPane` and `MainWindow`)
+- **`VideoPane`** is one feed's display: a title, the video, and a live FPS
+  count. It's written once and used twice, so both feeds are identical and
+  there's no copy-pasted code.
+- **`MainWindow`** puts the two panes side by side, adds the controls and status
+  bar, and connects the pipeline's signals to the panes.
 
-* **`VideoPane`** is a reusable widget: a title, the video image, and a live
-  FPS read-out. Writing it once and instantiating it twice keeps the two feeds
-  guaranteed-identical and the code DRY.
-* **`MainWindow`** lays the two panes out side by side (the "structured,
-  intentional layout"), adds the control bar, and wires the pipeline's signals
-  to the panes.
+### 4.4 Errors and cleanup
 
-### 3.4 Error handling
-
-GStreamer reports problems (e.g. camera permission denied) asynchronously on a
-*message bus*. A `QTimer` polls that bus 10×/second from the GUI thread and, on
-an error, shows it in the status bar and resets the controls — so a failure is
-visible and recoverable instead of a silent freeze or a crash. The camera is
-always released on **Stop** and on window close (`set_state(NULL)`).
+GStreamer reports problems (like denied camera access) on a message bus. A timer
+checks that bus ten times a second and, on an error, shows it in the status bar
+and resets the buttons — so a failure is visible, not a silent freeze. The camera
+is always released on Stop and when the window closes.
 
 ---
 
-## 4. Features, and why each one earns its place
+## 5. Features, and why each one is there
 
-The task asks for functionality that genuinely makes sense, so every feature is
-justified rather than decorative:
+Each feature earns its place rather than being decoration:
 
-| Feature | Why it's there |
+| Feature | Why |
 |---|---|
-| **Two side-by-side panes** | The core requirement: prove two feeds run at once. |
-| **Source selector (Webcam / Test pattern)** | Makes the app runnable on *any* machine — graceful fallback when no camera or permission. This is also what makes the project testable in CI / headless. |
-| **Start / Stop** | Explicit control over the camera; Stop actually frees the device. |
-| **Live FPS per feed** | Immediate, honest feedback that both feeds are truly live and keeping up — the most useful single diagnostic for a video system. |
-| **Snapshot both** | Capture a synchronised still from each feed; a real, common operation for camera tooling. |
-| **Status bar + bus error surfacing** | Operators should never be left guessing why video stopped. |
-| **Aspect-ratio-preserving scaling** | The picture never distorts when the window is resized. |
+| Two side-by-side panes | The core requirement — shows two feeds running at once. |
+| Source selector (Webcam / Test pattern) | Runs on any machine and gives a fallback when there's no camera; also makes the app testable with no hardware. |
+| Start / Stop | Direct control of the camera; Stop actually releases it. |
+| Live FPS per feed | Honest, instant proof both feeds are live and keeping up. |
+| Snapshot both | Saves a still from each feed at once — a common camera-tool action. |
+| Status bar with errors shown | You're never left guessing why video stopped. |
+| Aspect-ratio-preserving scaling | The picture never stretches when you resize the window. |
 
 ---
 
-## 5. Verification
+## 6. Verification
 
-The frame path was validated automatically with a headless smoke test
-(`QT_QPA_PLATFORM=offscreen`, test-pattern source):
+I checked the frame path with an automated headless test, using the test pattern:
 
-* both feeds delivered ~74 frames over 2.5 s (≈30 fps), confirming the `tee`
-  truly drives two independent appsinks at full rate;
-* every frame arrived as a 640×480 `QImage` in `Format_RGB888`;
-* a full `MainWindow` Start→Stop cycle ran cleanly and released the pipeline.
+- both feeds delivered about 74 frames over 2.5 seconds (~30 fps), confirming the
+  `tee` drives both outputs at full rate;
+- every frame arrived as a 640x480 RGB image;
+- a full Start then Stop cycle ran cleanly and released the pipeline.
 
-The webcam source additionally requires interactive camera permission, so it is
-verified by running the app normally (Source → Webcam → Start).
+The webcam needs interactive camera permission, so it's verified by running the
+app normally (Source: Webcam, then Start).
 
 ---
 
-## 6. What I'd build next (intended, not yet implemented)
+## 7. What I'd build next
 
-Documenting intent, as the task invites:
-
-* **Per-feed processing** — give the second branch a distinct GStreamer effect
-  (grayscale / edge-detect via `videobalance` or `edgetv`) to show the panes
-  doing genuinely different work, not just duplication. The `tee` architecture
-  already supports adding elements on one branch only.
-* **Networked H.264 feeds** — match the team's real setup by encoding with
-  `x264enc` and sending over the network with `rtph264pay`/`udpsink`, decoding
-  in the GUI. (This build's GStreamer was missing the H.264 plugins, so I kept
-  the demo to raw video; the architecture is unchanged — only the source branch
-  differs.)
-* **Six feeds** — the team's production setup. The `VideoPane` + `tee`/appsink
-  pattern scales directly: a 2×3 grid of panes with one appsink each.
-* **Record-to-disk** per feed (`filesink` branch off the `tee`).
-```
+- **Different effect per feed** — give the second branch its own GStreamer effect
+  (e.g. grayscale or edge-detect) so the panes do visibly different work, not
+  just a copy. The `tee` setup already allows adding elements to one branch only.
+- **Networked H.264 feeds** — match the team's real setup by encoding to H.264
+  and streaming over the network, decoding in the GUI. This build's GStreamer was
+  missing the H.264 plugins, so I kept the demo to raw video; only the source
+  would change.
+- **Six feeds** — the team's production scale. The same pane + `tee`/`appsink`
+  pattern extends straight to a 2x3 grid.
+- **Record to disk** per feed.

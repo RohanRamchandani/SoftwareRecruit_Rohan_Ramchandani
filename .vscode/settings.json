@@ -1,0 +1,10 @@
+{
+  // Use the `camerafeed` conda env's interpreter, which has PyQt5 + the
+  // GStreamer (`gi` / PyGObject) bindings installed. Without this, the editor
+  // falls back to the system Python and reports "import could not be resolved"
+  // for gi and PyQt5 even though the code runs fine inside the env.
+  "python.defaultInterpreterPath": "/opt/anaconda3/envs/camerafeed/bin/python",
+  "python.analysis.extraPaths": [
+    "/opt/anaconda3/envs/camerafeed/lib/python3.12/site-packages"
+  ]
+}
