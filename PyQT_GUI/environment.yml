@@ -1,0 +1,13 @@
+name: camerafeed
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pygobject
+  - gst-python
+  - gstreamer
+  - gst-plugins-base
+  - gst-plugins-good
+  - gst-plugins-bad
+  - pyqt
+  - numpy
